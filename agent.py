@@ -91,11 +91,14 @@ TOOLS = [{"functionDeclarations": [
 _VOCAB = {}
 for _col, _q in {"commodity": "select distinct commodity from deals",
                  "region": "select distinct region from deals",
-                 "region_ru": "select distinct region_ru from deals"}.items():
+                 "region_ru": "select distinct region_ru from deals",
+                 "grade_n": "select distinct grade_n from deals where grade_n is not null",
+                 "class_n": "select distinct class_n from deals where class_n is not null",
+                 "mark": "select distinct mark from deals where mark is not null"}.items():
     _VOCAB[_col] = sorted(r[0] for r in _db.execute(_q).fetchall())
 _VOCAB["seller_region"] = _VOCAB["buyer_region"] = _VOCAB["region"]
 _LIT = r"'(?:[^']|'')*'"
-_FILTER = re.compile(r"\b(commodity|region_ru|seller_region|buyer_region|region)\s*(=|<>|!=|i?like|in\s*\()\s*((?:" + _LIT + r"\s*,?\s*)+)", re.I)
+_FILTER = re.compile(r"\b(commodity|region_ru|seller_region|buyer_region|region|grade_n|class_n|mark)\s*(=|<>|!=|i?like|in\s*\()\s*((?:" + _LIT + r"\s*,?\s*)+)", re.I)
 
 
 def check_literals(sql: str):
