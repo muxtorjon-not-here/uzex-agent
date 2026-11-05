@@ -1,0 +1,5 @@
+duckdb==2.0.0
+fastapi==0.162.0
+uvicorn
+httpx
+python-dotenv
