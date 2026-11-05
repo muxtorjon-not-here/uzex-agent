@@ -18,7 +18,7 @@ API = "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateConte
 MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview").split(",") if m.strip()]
 MODELS += ["groq:" + m.strip() for m in os.getenv("GROQ_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-120b").split(",") if m.strip()]
 # last-resort capacity: each model has its own per-minute limit, and the verifier applies to all of them
-MODELS += [m.strip() for m in os.getenv("TAIL_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite,groq:openai/gpt-oss-20b").split(",") if m.strip()]
+MODELS += [m.strip() for m in os.getenv("TAIL_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m.strip()]
 MODELS = ["openai:" + m.strip() for m in os.getenv("OPENAI_MODELS", "gpt-5-mini,gpt-4.1-mini").split(",") if m.strip()] + MODELS  # used only if OPENAI_API_KEY is set
 GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 OPENAI_API = "https://api.openai.com/v1/chat/completions"
