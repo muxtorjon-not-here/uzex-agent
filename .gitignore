@@ -6,3 +6,5 @@ __pycache__/
 eval_results*.json
 server.log
 eval_groq*.log
+server2.log
+eval_groq2.log

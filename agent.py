@@ -19,7 +19,7 @@ MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.6-flash,gemini
 MODELS += ["groq:" + m.strip() for m in os.getenv("GROQ_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-120b").split(",") if m.strip()]
 # last-resort capacity: each model has its own per-minute limit, and the verifier applies to all of them
 MODELS += [m.strip() for m in os.getenv("TAIL_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m.strip()]
-MODELS = ["openai:" + m.strip() for m in os.getenv("OPENAI_MODELS", "gpt-5-mini,gpt-4.1-mini").split(",") if m.strip()] + MODELS  # used only if OPENAI_API_KEY is set
+MODELS = ["openai:" + m.strip() for m in os.getenv("OPENAI_MODELS", "gpt-5.5,gpt-5.4").split(",") if m.strip()] + MODELS  # used only if OPENAI_API_KEY is set
 GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 OPENAI_API = "https://api.openai.com/v1/chat/completions"
 _exhausted = {}  # model -> time until which its daily quota is spent
@@ -56,13 +56,15 @@ DATA RULES (from the organisers' README)
 - Money: amount is in contract currency (UZS, or USD for export). NEVER sum amount across currencies. For totals use amount_uzs (USD converted at the deal-date rate; already computed). For export-only questions report USD (amount) and, if useful, amount_uzs.
 - Average price: volume-weighted = SUM(amount)/SUM(volume), per unit and currency, unless the question asks for a simple average or median. State which.
 - Units: NEVER sum different units. Бензин is sold in тонна and литр, Дизельное топливо in тонна and килограмм. volume_t converts kg and t to tonnes (NULL for other units). Group by unit for price and for litres. Check the units before answering a volume or price question on a product.
-- Products: filter by commodity (canonical, exact values listed below), never by the raw product text. grade_n: '1','2','3','высший'. class_n: '1','2','3','4'. mark e.g. 'АИ-92', 'ЦЕМI42,5Н', 'ЦЕМII/А-Ш32,5Н', 'БНД90/130', 'NE24/1', 'PP-2310', 'ДТ-Е-К5', spaces removed and upper-case. size_n e.g. 'Ø12ММ'. Use contract_form for spot/forward/futures of cotton.
+- Products: filter by commodity (canonical Russian value listed below, e.g. bug'doy = 'Пшеница'), never by the raw product text. grade_n = сорт = nav: '1','2','3','высший'. class_n = класс = sinf: '1','2','3','4' ("3-sinf" means class_n='3', not grade_n). Wheat and cotton have classes. mark e.g. 'АИ-92', 'ЦЕМI42,5Н', 'ЦЕМII/А-Ш32,5Н', 'БНД90/130', 'NE24/1', 'PP-2310', 'ДТ-Е-К5', spaces removed and upper-case. size_n e.g. 'Ø12ММ'. Use contract_form for spot/forward/futures of cotton.
 - Regions: deals.region, participants.region, brokers.region use Uzbek names; deals.region_ru and contracts.region use Russian. region is the seller's warehouse region. seller_region and buyer_region are company registration regions. If asked "buyers from X" use buyer_region; "sold in/from X" or "region of the deal" use region.
 - Companies/brokers: ALWAYS call find_entity first when the question names one, passing only the name itself, then filter by inn or broker code, never by name. If it finds nothing, retry once with the shortest distinctive part of the name before saying the company is absent. Several different companies can have near-identical names: if find_entity returns more than one plausible match with a different INN, report each one separately or say which you used. If none matches, the company is not in the data: use rule 2.
 - An INN in the question: filter seller_inn or buyer_inn directly; a company is either a seller or a buyer.
 - Late payment: paid_date - deal_date > pay_days (days_to_pay > pay_days). Late delivery: days_to_deliver > delivery_days. pay_days runs from deal date, delivery_days from payment date, calendar days.
 - Partially delivered: status 'Исполнен(Частично)', delivered_lots of qty, delivered_volume in units.
-- USD rate of a day: usd_rates(rate_date, rate). Sum/start price per unit: start_price is per unit of measure in contract currency.
+- Currency rates: ONLY the US dollar exists, in usd_rates(rate_date, rate). Euro, ruble, yuan or any other currency is NOT in the data: rule 2, never give the dollar rate instead.
+- Year-over-year or share of turnover: always use SUM(amount_uzs) with NOT is_cancelled, computed in one SQL.
+- A broker code such as BK027: query brokers directly by broker_code. Sum/start price per unit: start_price is per unit of measure in contract currency.
 - Dates are DATE type. Months: yr and mon columns. Quarter: quarter(deal_date). When the period is not stated, use the whole data and say so.
 - Use LIMIT for rankings and include ties awareness. Return the name and INN together in ranking queries.
 - Contract details (deposit, delivery_basis, packaging, warehouse, registered, valid_until) are in contracts.
@@ -162,6 +164,10 @@ STOPWORDS = {"kompaniya", "kompaniyasi", "kompaniyasining", "kompaniyasiga", "ko
 
 
 def find_entity(name: str) -> dict:
+    code = name.strip().upper()
+    exact = [{a: b for a, b in e.items() if a != "key"} for e in _entities if code in (e.get("broker_code"), e.get("inn"))]
+    if exact:
+        return {"matches": exact}
     full = name_key(name)
     words = [w for w in full.split() if w not in STOPWORDS]
     res = _search(" ".join(words)) if words else []
