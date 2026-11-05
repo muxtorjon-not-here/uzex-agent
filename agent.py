@@ -308,7 +308,8 @@ def _call(key, contents, deadline):
     body = {"systemInstruction": {"parts": [{"text": SYSTEM}]}, "contents": contents, "tools": TOOLS,
             "generationConfig": {"temperature": 0}}
     last = None
-    for attempt in range(6):
+    for attempt in range(60):  # bounded by the deadline below, not by attempts
+        wait = 0.0
         live = [m for m in MODELS if _exhausted.get(m, 0) < time.time() and _has_key(m)]
         if not live:
             raise RuntimeError("all models out of daily quota")
@@ -332,6 +333,10 @@ def _call(key, contents, deadline):
             else:
                 last = f"{model} HTTP {r.status_code}: {r.text[:200]}"
                 print("MODEL RETRY:", last, flush=True)
+                try:
+                    wait = float(r.headers.get("retry-after") or 0)
+                except ValueError:
+                    wait = 0.0
                 if r.status_code == 429 and "PerDay" in r.text:
                     _exhausted[model] = time.time() + 3600  # recheck hourly, no point hammering it
                     continue
@@ -341,7 +346,9 @@ def _call(key, contents, deadline):
         except httpx.HTTPError as e:
             last = f"{model} {e!r}"
             print("MODEL RETRY:", last, flush=True)
-        time.sleep(1 if attempt < len(MODELS) else 4)
+        # per-minute limits clear by themselves: after trying every model, wait instead of giving up
+        round_done = (attempt + 1) % len(live) == 0
+        time.sleep(min(max(wait, 3), 12) if round_done else 0.3)
     raise RuntimeError(last or "model unavailable")
 
 

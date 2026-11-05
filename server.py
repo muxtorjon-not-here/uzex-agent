@@ -29,7 +29,7 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "v": 6}
 
 
 @app.post("/api/ask")
