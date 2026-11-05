@@ -17,6 +17,8 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uzex.duckdb"
 API = "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
 MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview").split(",") if m.strip()]
 MODELS += ["groq:" + m.strip() for m in os.getenv("GROQ_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-120b").split(",") if m.strip()]
+# last-resort capacity: each model has its own per-minute limit, and the verifier applies to all of them
+MODELS += [m.strip() for m in os.getenv("TAIL_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite,groq:openai/gpt-oss-20b").split(",") if m.strip()]
 GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 _exhausted = {}  # model -> time until which its daily quota is spent
 DEADLINE_S = 75  # the committee allows 90 s per answer
@@ -54,7 +56,7 @@ DATA RULES (from the organisers' README)
 - Units: NEVER sum different units. Бензин is sold in тонна and литр, Дизельное топливо in тонна and килограмм. volume_t converts kg and t to tonnes (NULL for other units). Group by unit for price and for litres. Check the units before answering a volume or price question on a product.
 - Products: filter by commodity (canonical, exact values listed below), never by the raw product text. grade_n: '1','2','3','высший'. class_n: '1','2','3','4'. mark e.g. 'АИ-92', 'ЦЕМI42,5Н', 'ЦЕМII/А-Ш32,5Н', 'БНД90/130', 'NE24/1', 'PP-2310', 'ДТ-Е-К5', spaces removed and upper-case. size_n e.g. 'Ø12ММ'. Use contract_form for spot/forward/futures of cotton.
 - Regions: deals.region, participants.region, brokers.region use Uzbek names; deals.region_ru and contracts.region use Russian. region is the seller's warehouse region. seller_region and buyer_region are company registration regions. If asked "buyers from X" use buyer_region; "sold in/from X" or "region of the deal" use region.
-- Companies/brokers: ALWAYS call find_entity first when the question names one, then filter by inn or broker code, never by name. Several different companies can have near-identical names: if find_entity returns more than one plausible match with a different INN, report each one separately or say which you used. If none matches, the company is not in the data: use rule 2.
+- Companies/brokers: ALWAYS call find_entity first when the question names one, passing only the name itself, then filter by inn or broker code, never by name. If it finds nothing, retry once with the shortest distinctive part of the name before saying the company is absent. Several different companies can have near-identical names: if find_entity returns more than one plausible match with a different INN, report each one separately or say which you used. If none matches, the company is not in the data: use rule 2.
 - An INN in the question: filter seller_inn or buyer_inn directly; a company is either a seller or a buyer.
 - Late payment: paid_date - deal_date > pay_days (days_to_pay > pay_days). Late delivery: days_to_deliver > delivery_days. pay_days runs from deal date, delivery_days from payment date, calendar days.
 - Partially delivered: status 'Исполнен(Частично)', delivered_lots of qty, delivered_volume in units.
@@ -150,10 +152,20 @@ def run_sql(sql: str) -> dict:
     return {"columns": cols, "rows": [[_plain(v) for v in r] for r in rows[:MAX_ROWS]], "truncated": len(rows) > MAX_ROWS}
 
 
+STOPWORDS = {"kompaniya", "kompaniyasi", "kompaniyasining", "kompaniyasiga", "kompanii", "kompaniyu", "kompaniey", "firma", "firmasi",
+             "firmi", "korxona", "korxonasi", "tashkilot", "tashkiloti", "predpriyatie", "organizatsiya", "broker", "brokeri", "brokerskaya", "kontora"}
+
+
 def find_entity(name: str) -> dict:
-    q = name_key(name)
-    if not q:
-        return {"matches": []}
+    full = name_key(name)
+    words = [w for w in full.split() if w not in STOPWORDS]
+    res = _search(" ".join(words)) if words else []
+    if not res and full != " ".join(words):
+        res = _search(full)  # "broker" is part of many real names
+    return {"matches": res}
+
+
+def _search(q: str) -> list:
     scored = []
     words = q.split()
     for e in _entities:
@@ -172,7 +184,7 @@ def find_entity(name: str) -> dict:
                 continue
         scored.append((s, e))
     scored.sort(key=lambda x: -x[0])
-    return {"matches": [{**{a: b for a, b in e.items() if a != "key"}, "score": round(s, 2)} for s, e in scored[:8]]}
+    return [{**{a: b for a, b in e.items() if a != "key"}, "score": round(s, 2)} for s, e in scored[:8]]
 
 
 # ---------- verification ----------
