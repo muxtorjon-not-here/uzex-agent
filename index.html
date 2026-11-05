@@ -36,6 +36,7 @@ form{max-width:820px;margin:auto;display:flex;gap:8px}
 textarea{flex:1;min-width:0;resize:none;font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink)}
 button.send{background:var(--brand);color:var(--brand-ink);border:0;border-radius:10px;padding:0 18px;font:inherit;font-weight:600;cursor:pointer}
 button.send:disabled{opacity:.55;cursor:wait}
+@media (max-width:520px),(max-height:560px){header{padding:8px 16px}h1{font-size:15px}header p{display:none}footer{padding:8px 16px}textarea{font-size:16px}}
 </style>
 </head>
 <body>
@@ -47,7 +48,7 @@ button.send:disabled{opacity:.55;cursor:wait}
   <div id="ex"></div>
 </div></main>
 <footer><form id="f">
-  <textarea id="i" rows="2" maxlength="1000" placeholder="Savolingizni yozing · Задайте вопрос" aria-label="Savol / Вопрос"></textarea>
+  <textarea id="i" rows="2" maxlength="1000" placeholder="Savol · Вопрос" aria-label="Savol / Вопрос"></textarea>
   <button class="send" id="b">Yuborish</button>
 </form></footer>
 <script>
