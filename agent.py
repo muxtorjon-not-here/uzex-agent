@@ -19,7 +19,9 @@ MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.6-flash,gemini
 MODELS += ["groq:" + m.strip() for m in os.getenv("GROQ_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-120b").split(",") if m.strip()]
 # last-resort capacity: each model has its own per-minute limit, and the verifier applies to all of them
 MODELS += [m.strip() for m in os.getenv("TAIL_MODELS", "gemini-3.5-flash-lite,gemini-3.1-flash-lite,groq:openai/gpt-oss-20b").split(",") if m.strip()]
+MODELS = ["openai:" + m.strip() for m in os.getenv("OPENAI_MODELS", "gpt-5-mini,gpt-4.1-mini").split(",") if m.strip()] + MODELS  # used only if OPENAI_API_KEY is set
 GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
+OPENAI_API = "https://api.openai.com/v1/chat/completions"
 _exhausted = {}  # model -> time until which its daily quota is spent
 DEADLINE_S = 75  # the committee allows 90 s per answer
 MAX_ROWS = 50
@@ -306,6 +308,11 @@ def _groq_post(model, contents, timeout):
     return httpx.post(GROQ_API, headers={"Authorization": "Bearer " + os.environ.get("GROQ_API_KEY", "").strip()}, json=body, timeout=timeout)
 
 
+def _openai_post(model, contents, timeout):
+    body = {"model": model, "messages": _groq_messages(contents), "tools": _groq_tools()}
+    return httpx.post(OPENAI_API, headers={"Authorization": "Bearer " + os.environ.get("OPENAI_API_KEY", "").strip()}, json=body, timeout=timeout)
+
+
 def _from_groq(d):
     msg = d["choices"][0]["message"]
     parts = [{"text": msg["content"]}] if msg.get("content") else []
@@ -316,7 +323,8 @@ def _from_groq(d):
 
 # ---------- model loop ----------
 def _has_key(model):
-    return bool(os.environ.get("GROQ_API_KEY" if model.startswith("groq:") else "GEMINI_API_KEY", "").strip())
+    name = "GROQ_API_KEY" if model.startswith("groq:") else "OPENAI_API_KEY" if model.startswith("openai:") else "GEMINI_API_KEY"
+    return bool(os.environ.get(name, "").strip())
 
 
 def _call(key, contents, deadline):
@@ -333,8 +341,9 @@ def _call(key, contents, deadline):
         if left < 3:
             break
         try:
-            if model.startswith("groq:"):
-                r = _groq_post(model[5:], contents, min(left, 30))
+            if model.startswith(("groq:", "openai:")):
+                post = _groq_post if model.startswith("groq:") else _openai_post
+                r = post(model.split(":", 1)[1], contents, min(left, 30))
                 if r.status_code == 200:
                     return _from_groq(r.json()), model
             else:
