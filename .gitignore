@@ -4,3 +4,4 @@ __pycache__/
 *.tmp
 *.wal
 eval_results*.json
+server.log

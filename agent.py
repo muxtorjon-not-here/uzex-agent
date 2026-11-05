@@ -15,7 +15,9 @@ from textnorm import name_key
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uzex.duckdb")
 API = "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
-MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
+MODELS = [m.strip() for m in os.getenv(
+    "GEMINI_MODELS", "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m.strip()]
+_exhausted = {}  # model -> time until which its daily quota is spent
 DEADLINE_S = 75  # the committee allows 90 s per answer
 MAX_ROWS = 50
 
@@ -39,7 +41,9 @@ HARD RULES
    Uzbek: "Ma'lumotda javob yo'q." / Russian: "В данных ответа нет." and one short sentence on what is missing. Do not guess or give a near substitute. Do not mention a product/company that was asked about but not found.
 3. Answer in the language AND script of the question (Uzbek Latin, Uzbek Cyrillic, or Russian).
 4. Compute everything in SQL, including percentages, differences, shares, roundings. Never do arithmetic yourself. Copy numbers from the results exactly; you may round money to "mlrd/млрд", "mln/млн" only with 2+ decimals, and then also keep the exact figure.
-5. Start with the direct answer. Then one short line "Hisoblash:"/"Расчёт:" stating filters used (period, statuses, units, currency). No filler.
+5. Start with the direct answer. Then one short line "Hisoblash:"/"Расчёт:" stating in plain words the filters used (period, statuses, units, currency), with no SQL, column names or code. No filler.
+6. Use as few tool calls as possible: normally one run_sql that returns everything needed, including totals with and without cancelled deals. Never run a second query only to double-check.
+7. If you say the data has no answer, stop there. Do not add figures after a no-answer reply.
 
 DATA RULES (from the organisers' README)
 - Table deals is one wide table. Use it. volume = qty*lot in unit of measure, unit_price = amount/(qty*lot), both precomputed.
@@ -81,6 +85,33 @@ TOOLS = [{"functionDeclarations": [
      "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}}, "required": ["name"]}},
 ]}]
 
+_VOCAB = {}
+for _col, _q in {"commodity": "select distinct commodity from deals",
+                 "region": "select distinct region from deals",
+                 "region_ru": "select distinct region_ru from deals"}.items():
+    _VOCAB[_col] = sorted(r[0] for r in _db.execute(_q).fetchall())
+_VOCAB["seller_region"] = _VOCAB["buyer_region"] = _VOCAB["region"]
+_LIT = r"'(?:[^']|'')*'"
+_FILTER = re.compile(r"\b(commodity|region_ru|seller_region|buyer_region|region)\s*(=|<>|!=|i?like|in\s*\()\s*((?:" + _LIT + r"\s*,?\s*)+)", re.I)
+
+
+def check_literals(sql: str):
+    """A filter on a value that does not exist returns 0 rows, which looks like 'no data'. Reject it so the model retries."""
+    for m in _FILTER.finditer(sql):
+        col, op = m.group(1).lower(), m.group(2).lower()
+        vocab = _VOCAB[col]
+        for lit in re.findall(_LIT, m.group(3)):
+            v = lit[1:-1].replace("''", "'")
+            if "like" in op:
+                core = v.strip("%").lower()
+                ok = all(p in " ".join(vocab).lower() for p in core.split("%") if p)
+            else:
+                ok = v in vocab
+            if not ok:
+                return f"{col} has no value {v!r}. Valid values: {vocab}. Use the exact value, translating Uzbek product names to the Russian canonical name."
+    return None
+
+
 FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|attach|detach|copy|export|import|install|load|pragma|set|call|checkpoint|read_csv\w*|read_parquet|read_text|read_blob|glob)\b", re.I)
 
 
@@ -100,6 +131,9 @@ def run_sql(sql: str) -> dict:
     s = sql.strip().rstrip(";")
     if ";" in s or not re.match(r"^(select|with)\b", s, re.I) or FORBIDDEN.search(re.sub(r"'[^']*'", "''", s)):
         return {"error": "Only a single read-only SELECT is allowed."}
+    problem = check_literals(s)
+    if problem:
+        return {"error": problem}
     cur = _db.cursor()
     timer = threading.Timer(25, cur.interrupt)
     timer.start()
@@ -144,7 +178,8 @@ def find_entity(name: str) -> dict:
 NUM_RE = re.compile(r"(?<![\w.,])\d[\d\s  ]*(?:[.,]\d+)?(?![\d])")
 DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
 SCALES = [(r"трлн|trln", 1e12), (r"млрд|mlrd|milliard", 1e9), (r"млн|mln|million|миллион", 1e6), (r"тыс|ming", 1e3)]
-NAME_RE = re.compile(r"\"[^\"\n]{2,60}\"\s*(?:MChJ|МЧЖ|AJ|АЖ|XK|ХК)|[A-ZА-ЯЎҚҒҲ‘’]{2,}(?:\s[A-ZА-ЯЎҚҒҲ‘’]{2,})+\s(?:MCHJ|МЧЖ|AJ|XK)\b")
+_LEGAL = r"(?:MChJ|MCHJ|МЧЖ|AJ|АЖ|XK|ХК|OK|ОК|QK|ҚК)"
+NAME_RE = re.compile(r"[\"«“][^\"»”\n]{2,60}[\"»”]\s*" + _LEGAL + r"\b|\b[A-ZА-ЯЎҚҒҲ‘’]{2,}(?:\s[A-ZА-ЯЎҚҒҲ‘’]{2,})*\s(?:" + _LEGAL + r"|MAS.ULIYATI CHEKLANGAN JAMIYATI)\b")
 REFUSALS = ("ma'lumotda javob yo", "ma’lumotda javob yo", "ma‘lumotda javob yo", "в данных ответа нет", "маълумотда жавоб йўқ")
 
 
@@ -218,12 +253,15 @@ def _call(key, contents, deadline):
             "generationConfig": {"temperature": 0}}
     last = None
     for attempt in range(6):
-        model = MODELS[min(attempt // 2, len(MODELS) - 1)]
+        live = [m for m in MODELS if _exhausted.get(m, 0) < time.time()]
+        if not live:
+            raise RuntimeError("all models out of daily quota")
+        model = live[attempt % len(live)]  # any failure moves on to the next model
         left = deadline - time.time()
         if left < 3:
             break
         try:
-            r = httpx.post(API.format(m=model), headers={"x-goog-api-key": key}, json=body, timeout=min(left, 40))
+            r = httpx.post(API.format(m=model), headers={"x-goog-api-key": key}, json=body, timeout=min(left, 30))
             if r.status_code == 200:
                 d = r.json()
                 cand = (d.get("candidates") or [{}])[0]
@@ -231,12 +269,18 @@ def _call(key, contents, deadline):
                     return cand["content"], model
                 last = "empty response: " + str(cand.get("finishReason"))
             else:
-                last = f"HTTP {r.status_code}: {r.text[:200]}"
-                if r.status_code not in (429, 500, 503):
-                    break
+                last = f"{model} HTTP {r.status_code}: {r.text[:200]}"
+                print("MODEL RETRY:", last, flush=True)
+                if r.status_code == 429 and "PerDay" in r.text:
+                    _exhausted[model] = time.time() + 3600  # recheck hourly, no point hammering it
+                    continue
+                if r.status_code == 404:
+                    _exhausted[model] = time.time() + 86400
+                    continue
         except httpx.HTTPError as e:
-            last = repr(e)
-        time.sleep(min(2 * (attempt + 1), 6))
+            last = f"{model} {e!r}"
+            print("MODEL RETRY:", last, flush=True)
+        time.sleep(1 if attempt < len(MODELS) else 4)
     raise RuntimeError(last or "model unavailable")
 
 
@@ -246,6 +290,20 @@ def lang_of(q: str) -> str:
     if re.search(r"[а-яА-Я]", q):
         return "ru"
     return "uz"
+
+
+LANG_NAME = {"ru": "Russian", "uz": "Uzbek in Latin script", "uzc": "Uzbek in Cyrillic script"}
+
+
+def wrong_language(text: str, lang: str) -> bool:
+    """Judges the first line only, ignoring quoted and upper-case company names."""
+    line = text.strip().split("\n")[0]
+    line = re.sub(r"[\"«“][^\"»”]*[\"»”]|\b[A-ZА-ЯЎҚҒҲ‘’]{2,}\b", " ", line)
+    cyr = len(re.findall(r"[а-яёўқғҳ]", line.lower()))
+    lat = len(re.findall(r"[a-z]", line.lower()))
+    if cyr + lat < 12:
+        return False
+    return cyr < lat if lang in ("ru", "uzc") else cyr > lat
 
 
 MSG = {
@@ -263,7 +321,7 @@ def answer(question: str) -> dict:
     t0 = time.time()
     deadline = t0 + DEADLINE_S
     lang = lang_of(question)
-    contents = [{"role": "user", "parts": [{"text": question}]}]
+    contents = [{"role": "user", "parts": [{"text": f"{question}\n\n[Answer only in {LANG_NAME[lang]}.]"}]}]
     steps, retries, model = [], 0, None
     out = lambda text, status: {"answer": text, "status": status, "steps": steps, "seconds": round(time.time() - t0, 1), "model": model}
     try:
@@ -286,14 +344,21 @@ def answer(question: str) -> dict:
                 contents.append({"role": "user", "parts": replies})
                 continue
             text = "".join(p.get("text", "") for p in content["parts"] if not p.get("thought")).strip()
-            if is_refusal(text):
-                return out(text, "no_data")
-            if not any("rows" in s["result"] and s["result"]["rows"] for s in steps):
+            refusal = is_refusal(text)
+            if refusal:
+                # keep only the no-answer statement: figures after it are not part of a refusal
+                text = text.split("\n")[0].strip()
+                bad = verify(text, question, steps)
+            elif not any("rows" in s["result"] and s["result"]["rows"] for s in steps):
                 bad = ["no data was queried"]
             else:
                 bad = verify(text, question, steps)
+            if not bad and wrong_language(text, lang) and retries == 0:
+                retries += 1
+                contents.append({"role": "user", "parts": [{"text": f"Rewrite the same answer entirely in {LANG_NAME[lang]}. Keep every number unchanged."}]})
+                continue
             if not bad:
-                return out(text, "verified")
+                return out(text, "no_data" if refusal else "verified")
             retries += 1
             if retries > 2:
                 return out(MSG["unverified"][lang], "unverified")

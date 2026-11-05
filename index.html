@@ -58,7 +58,8 @@ const el=(tag,cls,txt)=>{const e=document.createElement(tag);if(cls)e.className=
 const LABEL={verified:["✓ Ma'lumot bilan tekshirildi · Проверено по данным",""],no_data:["Ma'lumotda javob yo'q · В данных ответа нет","w"],unverified:["Tasdiqlanmadi · Не подтверждено","w"],error:["Xizmat xatosi · Ошибка сервиса","w"]};
 function table(r){const w=el('div','tw'),t=el('table'),h=el('tr');r.columns.forEach(c=>h.appendChild(el('th',null,c)));t.appendChild(h);
  r.rows.slice(0,20).forEach(row=>{const tr=el('tr');row.forEach(v=>tr.appendChild(el('td',null,v==null?'':String(v))));t.appendChild(tr)});w.appendChild(t);return w}
-function render(box,d){box.textContent='';box.appendChild(el('div','txt',d.answer));
+function rich(t){const e=el('div','txt');t.replace(/`/g,'').split('**').forEach((p,i)=>e.appendChild(i%2?el('b',null,p):document.createTextNode(p)));return e}
+function render(box,d){box.textContent='';box.appendChild(rich(d.answer));
  const [l,c]=LABEL[d.status]||LABEL.error;box.appendChild(el('span','badge '+c,l));box.appendChild(el('span','meta',d.seconds+' s'));
  const st=(d.steps||[]);if(st.length){const det=el('details');det.open=d.status==='verified';det.appendChild(el('summary',null,"Javob asosi · На чём основан ответ ("+st.length+")"));
   st.forEach(s=>{if(s.tool==='run_sql'){det.appendChild(el('pre',null,s.args.sql));if(s.result.rows&&s.result.rows.length)det.appendChild(table(s.result));else det.appendChild(el('div',null,s.result.error||"0 qator / 0 строк"))}
