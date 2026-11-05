@@ -17,6 +17,8 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uzex.duckdb"
 API = "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
 MODELS = [m.strip() for m in os.getenv(
     "GEMINI_MODELS", "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m.strip()]
+MODELS += ["groq:" + m.strip() for m in os.getenv("GROQ_MODELS", "openai/gpt-oss-120b").split(",") if m.strip()]
+GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 _exhausted = {}  # model -> time until which its daily quota is spent
 DEADLINE_S = 75  # the committee allows 90 s per answer
 MAX_ROWS = 50
@@ -247,13 +249,65 @@ def verify(answer: str, question: str, steps):
     return bad
 
 
-# ---------- Gemini loop ----------
+# ---------- Groq adapter: the loop keeps Gemini-shaped messages, this translates both ways ----------
+def _groq_tools():
+    out = []
+    for f in TOOLS[0]["functionDeclarations"]:
+        props = {k: {"type": v["type"].lower()} for k, v in f["parameters"]["properties"].items()}
+        out.append({"type": "function", "function": {"name": f["name"], "description": f["description"],
+                    "parameters": {"type": "object", "properties": props, "required": f["parameters"]["required"]}}})
+    return out
+
+
+def _groq_messages(contents):
+    msgs, pending, n = [{"role": "system", "content": SYSTEM}], [], 0
+    for c in contents:
+        if c["role"] == "model":
+            calls = []
+            for p in c["parts"]:
+                if "functionCall" in p:
+                    n += 1
+                    pending.append(f"call_{n}")
+                    calls.append({"id": f"call_{n}", "type": "function", "function": {
+                        "name": p["functionCall"]["name"], "arguments": json.dumps(p["functionCall"].get("args", {}), ensure_ascii=False)}})
+            m = {"role": "assistant", "content": "".join(p.get("text", "") for p in c["parts"] if not p.get("thought"))}
+            if calls:
+                m["tool_calls"] = calls
+            msgs.append(m)
+        else:
+            for p in c["parts"]:
+                if "functionResponse" in p:
+                    msgs.append({"role": "tool", "tool_call_id": pending.pop(0),
+                                 "content": json.dumps(p["functionResponse"]["response"]["result"], ensure_ascii=False)})
+                else:
+                    msgs.append({"role": "user", "content": p.get("text", "")})
+    return msgs
+
+
+def _groq_post(model, contents, timeout):
+    body = {"model": model, "messages": _groq_messages(contents), "tools": _groq_tools(), "temperature": 0}
+    return httpx.post(GROQ_API, headers={"Authorization": "Bearer " + os.environ.get("GROQ_API_KEY", "").strip()}, json=body, timeout=timeout)
+
+
+def _from_groq(d):
+    msg = d["choices"][0]["message"]
+    parts = [{"text": msg["content"]}] if msg.get("content") else []
+    for tc in msg.get("tool_calls") or []:
+        parts.append({"functionCall": {"name": tc["function"]["name"], "args": json.loads(tc["function"]["arguments"] or "{}")}})
+    return {"role": "model", "parts": parts or [{"text": ""}]}
+
+
+# ---------- model loop ----------
+def _has_key(model):
+    return bool(os.environ.get("GROQ_API_KEY" if model.startswith("groq:") else "GEMINI_API_KEY", "").strip())
+
+
 def _call(key, contents, deadline):
     body = {"systemInstruction": {"parts": [{"text": SYSTEM}]}, "contents": contents, "tools": TOOLS,
             "generationConfig": {"temperature": 0}}
     last = None
     for attempt in range(6):
-        live = [m for m in MODELS if _exhausted.get(m, 0) < time.time()]
+        live = [m for m in MODELS if _exhausted.get(m, 0) < time.time() and _has_key(m)]
         if not live:
             raise RuntimeError("all models out of daily quota")
         model = live[attempt % len(live)]  # any failure moves on to the next model
@@ -261,7 +315,12 @@ def _call(key, contents, deadline):
         if left < 3:
             break
         try:
-            r = httpx.post(API.format(m=model), headers={"x-goog-api-key": key}, json=body, timeout=min(left, 30))
+            if model.startswith("groq:"):
+                r = _groq_post(model[5:], contents, min(left, 30))
+                if r.status_code == 200:
+                    return _from_groq(r.json()), model
+            else:
+                r = httpx.post(API.format(m=model), headers={"x-goog-api-key": key.strip()}, json=body, timeout=min(left, 30))
             if r.status_code == 200:
                 d = r.json()
                 cand = (d.get("candidates") or [{}])[0]
