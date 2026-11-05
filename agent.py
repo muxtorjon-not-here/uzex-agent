@@ -15,9 +15,8 @@ from textnorm import name_key
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uzex.duckdb")
 API = "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
-MODELS = [m.strip() for m in os.getenv(
-    "GEMINI_MODELS", "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m.strip()]
-MODELS += ["groq:" + m.strip() for m in os.getenv("GROQ_MODELS", "openai/gpt-oss-120b").split(",") if m.strip()]
+MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview").split(",") if m.strip()]
+MODELS += ["groq:" + m.strip() for m in os.getenv("GROQ_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-120b").split(",") if m.strip()]
 GROQ_API = "https://api.groq.com/openai/v1/chat/completions"
 _exhausted = {}  # model -> time until which its daily quota is spent
 DEADLINE_S = 75  # the committee allows 90 s per answer
@@ -43,7 +42,7 @@ HARD RULES
    Uzbek: "Ma'lumotda javob yo'q." / Russian: "В данных ответа нет." and one short sentence on what is missing. Do not guess or give a near substitute. Do not mention a product/company that was asked about but not found.
 3. Answer in the language AND script of the question (Uzbek Latin, Uzbek Cyrillic, or Russian).
 4. Compute everything in SQL, including percentages, differences, shares, roundings. Never do arithmetic yourself. Copy numbers from the results exactly; you may round money to "mlrd/млрд", "mln/млн" only with 2+ decimals, and then also keep the exact figure.
-5. Start with the direct answer. Then one short line "Hisoblash:"/"Расчёт:" stating in plain words the filters used (period, statuses, units, currency), with no SQL, column names or code. No filler.
+5. Start with the direct answer as one full sentence, never a bare number, with the unit or currency and thousands separated by spaces (106 647). Write company names exactly as in the results. Then one short line "Hisoblash:"/"Расчёт:" stating in plain words the filters used (period, statuses, units, currency), with no SQL, column names or code. No filler.
 6. Use as few tool calls as possible: normally one run_sql that returns everything needed, including totals with and without cancelled deals. Never run a second query only to double-check.
 7. If you say the data has no answer, stop there. Do not add figures after a no-answer reply.
 
@@ -179,6 +178,7 @@ def find_entity(name: str) -> dict:
 # ---------- verification ----------
 NUM_RE = re.compile(r"(?<![\w.,])\d[\d\s  ]*(?:[.,]\d+)?(?![\d])")
 DATE_RE = re.compile(r"\b\d{2}\.\d{2}\.\d{4}\b")
+MONTHS = r"(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр|yanvar|fevral|mart|aprel|may|iyun|iyul|avgust|sentabr|oktabr|noyabr|dekabr|январ|феврал|апрел|июн|июл|август|сентябр|октябр|ноябр|декабр)"
 SCALES = [(r"трлн|trln", 1e12), (r"млрд|mlrd|milliard", 1e9), (r"млн|mln|million|миллион", 1e6), (r"тыс|ming", 1e3)]
 _LEGAL = r"(?:MChJ|MCHJ|МЧЖ|AJ|АЖ|XK|ХК|OK|ОК|QK|ҚК)"
 NAME_RE = re.compile(r"[\"«“][^\"»”\n]{2,60}[\"»”]\s*" + _LEGAL + r"\b|\b[A-ZА-ЯЎҚҒҲ‘’]{2,}(?:\s[A-ZА-ЯЎҚҒҲ‘’]{2,})*\s(?:" + _LEGAL + r"|MAS.ULIYATI CHEKLANGAN JAMIYATI)\b")
@@ -227,7 +227,9 @@ def verify(answer: str, question: str, steps):
     text = DATE_RE.sub(lambda m: m.group(0) if m.group(0) in blob or m.group(0) in question or m.group(0) in ("03.01.2022", "30.10.2026") else "\0" + m.group(0), answer)
     bad += [d for d in re.findall(r"\0(\d{2}\.\d{2}\.\d{4})", text)]
     text = DATE_RE.sub(" ", text.replace("\0", ""))
-    qnums = {_to_float(x) for x in NUM_RE.findall(question)}
+    qnums = {_to_float(x) for x in NUM_RE.findall(question)} | {float(x) for x in re.findall(r"\d+", question)}
+    # period boundaries such as "1 января" or "31 декабря"; any other day of a month must be supported like any number
+    text = re.sub(r"\b(?:1|28|29|30|31)\s+(?=" + MONTHS + ")", " ", text, flags=re.I)
     for m in NUM_RE.finditer(text):
         tok = m.group(0).strip()
         v = _to_float(tok)
@@ -344,18 +346,22 @@ def _call(key, contents, deadline):
 
 
 def lang_of(q: str) -> str:
-    if re.search(r"[ўқғҳЎҚҒҲ]", q):
-        return "uzc"
-    if re.search(r"[а-яА-Я]", q):
-        return "ru"
-    return "uz"
+    """Majority script decides, so an Uzbek question quoting a Russian product name stays Uzbek."""
+    t = re.sub(r"[\"«“][^\"»”]*[\"»”]", " ", q).lower()
+    cyr = len(re.findall(r"[а-яёўқғҳ]", t))
+    lat = len(re.findall(r"[a-z]", t))
+    if cyr <= lat:
+        return "uz"
+    return "uzc" if re.search(r"[ўқғҳ]", t) else "ru"
 
 
 LANG_NAME = {"ru": "Russian", "uz": "Uzbek in Latin script", "uzc": "Uzbek in Cyrillic script"}
 
 
 def wrong_language(text: str, lang: str) -> bool:
-    """Judges the first line only, ignoring quoted and upper-case company names."""
+    """Judges the first line only, ignoring quoted and upper-case company names. Also rejects mixed-script words."""
+    if re.search(r"[a-z][а-яёўқғҳ]|[а-яёўқғҳ][a-z]", text.lower()):
+        return True
     line = text.strip().split("\n")[0]
     line = re.sub(r"[\"«“][^\"»”]*[\"»”]|\b[A-ZА-ЯЎҚҒҲ‘’]{2,}\b", " ", line)
     cyr = len(re.findall(r"[а-яёўқғҳ]", line.lower()))
@@ -419,6 +425,7 @@ def answer(question: str) -> dict:
             if not bad:
                 return out(text, "no_data" if refusal else "verified")
             retries += 1
+            print("VERIFIER REJECTED:", bad, "| ANSWER:", text[:300].replace("\n", " "), flush=True)
             if retries > 2:
                 return out(MSG["unverified"][lang], "unverified")
             contents.append({"role": "user", "parts": [{"text":

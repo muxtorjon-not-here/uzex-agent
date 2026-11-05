@@ -19,6 +19,20 @@ for text, want in cases:
     got = agent.verify(text, "savol", steps)
     print("OK " if bool(got) == bool(want) else "FAIL", text, got)
 
+print("dates:")
+st = [{"result": {"columns": ["r"], "rows": [[12589.97]]}}]
+for text, q, want in [("Курс 15 марта 2025 года составлял 12 589,97 сум", "Какой курс был 15.03.2025?", False),
+                      ("С 1 января по 31 декабря 2024 года: 12 589,97", "курс?", False),
+                      ("Курс 17 марта 2025 года составлял 12 589,97 сум", "Какой курс был 15.03.2025?", True),
+                      ("Дата 2025-03-15, курс 12 589,97", "Какой курс был 15.03.2025?", False)]:
+    got = agent.verify(text, q, st)
+    print("OK " if bool(got) == want else "FAIL", text, got)
+
+print("question language:")
+for q, want in [("2023-yilda nechta bitim bekor qilingan (aннулирован)?", "uz"), ("Сколько сделок у компании FOMET BIZNES?", "ru"),
+                ("Қайси брокер энг кўп битим тузган?", "uzc"), ("\"Хлопок-сырец\" narxi qancha?", "uz")]:
+    print("OK " if agent.lang_of(q) == want else "FAIL", q, agent.lang_of(q))
+
 print("literal guard:")
 for q, want_err in [("select count(*) from deals where commodity = 'sement'", True), ("select count(*) from deals where commodity = 'Цемент'", False),
                     ("select count(*) from deals where commodity in ('Цемент','oltin')", True), ("select count(*) from deals where commodity ilike '%цемент%'", False),

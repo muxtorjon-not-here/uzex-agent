@@ -5,3 +5,4 @@ __pycache__/
 *.wal
 eval_results*.json
 server.log
+eval_groq*.log

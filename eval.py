@@ -8,6 +8,8 @@ import time
 import duckdb
 import httpx
 
+from textnorm import name_key
+
 D = "../uzex_spot_data"
 c = duckdb.connect()
 o = "header=true, all_varchar=true, delim=',', quote='\"', escape='\"'"
@@ -18,7 +20,7 @@ c.execute(f"create view rb as select * from read_csv('{D}/brokers.csv', {o})")
 c.execute(f"create view ru as select * from read_csv('{D}/usd_rates.csv', {o})")
 AMT = """cast(replace("Сумма сделки",' ','') as double)"""
 QTY = """cast(replace("Количество",' ','') as double)"""
-LOT = """cast(replace("Лот",' ','') as double)"""
+LOT = """cast(replace(rd."Лот",' ','') as double)"""
 OK = """"Состояние сделки" not like 'Аннулирован%'"""
 YR = lambda y: f""""Дата сделки" like '%.{y}'"""
 
@@ -44,6 +46,25 @@ CASES = [
     ("Сколько брокерских контор в данных?", [120], "num"),
     ("Сколько экспортных сделок было в 2022 году без аннулированных?", [one(f"""select count(*) from rd where {OK} and {YR(2022)} and "Тип контракта"='Экспортный'""")], "num"),
     ("Qancha ishtirokchi QQS to'lovchi hisoblanadi?", [one("""select count(*) from rp where "Плательщик НДС"='Да'""")], "num"),
+    # harder: traps from the README and the data profile
+    ("Сколько бензина продано в 2025 году без аннулированных сделок? Дай отдельно по тоннам и литрам.",
+     [one(f"""select sum({QTY}*{LOT}) from rd join rc using("Номер контракта") where {OK} and {YR(2025)} and upper("Наименование продукта") like '%БЕНЗИН%' and rd."Единица измерения"='тонна'"""),
+      one(f"""select sum({QTY}*{LOT}) from rd join rc using("Номер контракта") where {OK} and {YR(2025)} and upper("Наименование продукта") like '%БЕНЗИН%' and rd."Единица измерения"='литр'""")], "num"),
+    ("Какова общая сумма экспортных сделок в долларах за 2025 год без аннулированных?",
+     [one(f"""select round(sum({AMT}),2) from rd where {OK} and {YR(2025)} and "Тип контракта"='Экспортный'""")], "num"),
+    ("2024-yilda jami savdo aylanmasi so'mda qancha (eksportni kurs bo'yicha so'mga o'tkazib, bekor qilinganlarsiz)?",
+     [one(f"""select round(sum(case when "Тип контракта"='Экспортный' then {AMT}*cast(u."Курс" as double) else {AMT} end),2) from rd join ru u on rd."Дата сделки"=u."Дата" where {OK} and {YR(2024)}""")], "num"),
+    ("2025-yilda nechta bitim qisman yetkazilgan?", [one(f"""select count(*) from rd where {YR(2025)} and "Состояние сделки"='Исполнен(Частично)'""")], "num"),
+    ("Сколько сделок в 2024 году оплачено позже срока?",
+     [one(f"""select count(*) from rd join rc using("Номер контракта") where {YR(2024)} and "Дата оплаты"<>'' and strptime("Дата оплаты",'%d.%m.%Y')::date-strptime("Дата сделки",'%d.%m.%Y')::date>cast("Срок оплаты" as int)""")], "num"),
+    ("Shuzel Savdo kompaniyasi xaridor sifatida nechta bitim tuzgan?", [one("""select count(*) from rd where "ИНН покупателя"='947124787'""")], "num"),
+    ("Сколько сделок у компании FOMET BIZNES?", ["962497462", "945375950"], "str"),
+    ("Қайси брокер 2023 йилда сотувчи томонида энг кўп битим тузган?",
+     [one(f"""select b."Наименование" from rd join rb b on rd."Брокер продавца"=b."Код брокера" where {YR(2023)} and {OK} group by 1 order by count(*) desc limit 1""")], "str"),
+    ("Хлопок-сырец форвард: сколько тонн продано в 2024 году без аннулированных?",
+     [one(f"""select sum({QTY}*{LOT})/1000 from rd where {OK} and {YR(2024)} and "Форма контракта"='Форвард' and upper("Наименование товара") like '%ХЛОПОК%'""")], "num"),
+    ("Цемент средневзвешенная цена за тонну в 2025 году без аннулированных?",
+     [one(f"""select sum({AMT})/sum({QTY}*{LOT}) from rd join rc using("Номер контракта") where {OK} and {YR(2025)} and upper("Наименование продукта") like '%ЦЕМЕНТ%'""")], "num"),
     # must refuse: not in the data
     ("Сколько золота продано на бирже в 2024 году?", [], "refuse"),
     ("2027-yilda sement narxi qancha bo'ladi?", [], "refuse"),
@@ -54,21 +75,28 @@ CASES = [
 ]
 
 
+def agent_lang_wrong(a, q):
+    import agent
+    return agent.wrong_language(a, agent.lang_of(q))
+
+
 def digits(s):
     return re.sub(r"[\s  ]", "", s)
 
 
 def has_num(text, v):
-    t = digits(text).replace(",", ".")
     v = float(v)
-    forms = {f"{v:.0f}", f"{v:.1f}", f"{v:.2f}", str(v)}
-    return any(f in t for f in forms)
+    found = re.findall(r"\d[\d\s  ]*(?:[.,]\d+)?", text)
+    vals = [float(digits(x).replace(",", ".")) for x in found if digits(x).replace(",", ".").count(".") <= 1]
+    return any(abs(x - v) <= max(abs(v) * 1e-6, 0.51) for x in vals)
 
 
 def main():
     base = next((a for a in sys.argv[1:] if a.startswith("http")), "http://127.0.0.1:8000")
     passed, res = 0, []
-    for q, exp, kind in CASES:
+    only = next((a[5:] for a in sys.argv if a.startswith("only=")), None)
+    cases = [x for x in CASES if not only or re.search(only, x[0])]
+    for q, exp, kind in cases:
         t = time.time()
         r = httpx.post(base + "/api/ask", json={"question": q}, timeout=95).json()
         a, st = r["answer"], r["status"]
@@ -77,12 +105,14 @@ def main():
         elif kind == "num":
             ok = all(has_num(a, v) for v in exp)
         else:
-            ok = all(digits(str(v)).lower() in digits(a).lower() for v in exp)
+            ok = all(digits(str(v)).lower() in digits(a).lower() or name_key(str(v)) in name_key(a) for v in exp)
+        ok = ok and not (kind != "refuse" and agent_lang_wrong(a, q))
         passed += ok
-        print(("PASS" if ok else "FAIL"), f"[{time.time()-t:.1f}s {st}]", q, "\n   ->", a.replace("\n", " ")[:260], "\n   expected:", exp, flush=True)
+        wrong_lang = kind != "refuse" and __import__("agent").wrong_language(a, __import__("agent").lang_of(q))
+        print(("PASS" if ok else "FAIL"), "WRONGLANG" if wrong_lang else "", f"[{time.time()-t:.1f}s {st} {r.get('model')} calls={len(r['steps'])}]", q, "\n   ->", a.replace("\n", " ")[:300], "\n   expected:", exp, flush=True)
         res.append({"q": q, "expected": [str(x) for x in exp], "answer": a, "status": st, "ok": bool(ok), "steps": r["steps"]})
         time.sleep(float(next((a[6:] for a in sys.argv if a.startswith("sleep=")), 7)))
-    print(f"\n{passed}/{len(CASES)} passed")
+    print(f"\n{passed}/{len(cases)} passed")
     json.dump(res, open("eval_results.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1, default=str)
 
 
